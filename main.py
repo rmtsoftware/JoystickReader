@@ -1,117 +1,148 @@
-import sys
-import traceback
-from datetime import datetime
-
-import u3
-import u6
 import ue9
+import threading
+import LabJackPython
+from pyModbusTCP.client import ModbusClient
 
 
-# MAX_REQUESTS is the number of packets to be read.
-MAX_REQUESTS = 75
-# SCAN_FREQUENCY is the scan frequency of stream mode in Hz
-SCAN_FREQUENCY = 100
-SURGE_MIN = -5 #Вольты
-SURGE_MAX= 5 #Вольты
-SWAY_MIN = -5 #Вольты
-SWAY_MAX= 5 #Вольты
-YAW_MIN = -5 #Вольты
-YAW_MAX= 5 #Вольты
-HEAVY_MIN = -1 #Вольты
-HEAVY_MAX= 1 #Вольты
-
-
-
-
-d = None
-
-d = ue9.UE9(ethernet=True, ipAddress="172.27.12.71")
-
-# For applying the proper calibration to readings.
-d.getCalibrationData()
-
-print("Configuring UE9 stream")
-
-d.streamConfig(NumChannels=4, 
-               ChannelNumbers=[0, 1, 2, 3], 
-               ChannelOptions=[8, 8, 8, 8], 
-               SettlingTime=0, 
-               Resolution=12, 
-               ScanFrequency=SCAN_FREQUENCY)
-
-
-try:
-    print("Start stream")
-    d.streamStart()
-    start = datetime.now()
-    print("Start time is %s" % start)
-
-    missed = 0
-    dataCount = 0
-    packetCount = 0
-
-    for r in d.streamData():
+class LabJack(ue9.UE9):
+    def __init__(self, ip_address):
+        super(LabJack, self).__init__()
+        self.ethernet=True
+        self.ip_address = ip_address
+        self.getCalibrationData()
+        self.streamConfig(NumChannels=4, 
+                          ChannelNumbers=[0, 1, 2, 3], 
+                          ChannelOptions=[8, 8, 8, 8], 
+                          SettlingTime=0, 
+                          Resolution=12, 
+                          ScanFrequency=100)
         
-        if r is not None:
-            # Our stop condition
-            #if dataCount >= MAX_REQUESTS:
-            #    break
-           # print(r)
-           # continue 
+
+class StoppableThread(threading.Thread):
+    def __init__(self, *args, **kwargs):
+        super(StoppableThread, self).__init__(*args, **kwargs)
+        self.stop_event = threading.Event()
+
+    def stop(self):
+        self.stop_event.set()
+
+    def stopped(self) -> bool:
+        return self.stop_event.is_set()
+    
+
+class LabJackReaderTask(StoppableThread):
+
+    def __init__(self,
+                 ip_address: str = "172.27.12.71"):
         
-            if r["errors"] != 0:
-                print("Errors counted: %s ; %s" % (r["errors"], datetime.now()))
+        super().__init__()
 
-            if r["numPackets"] != d.packetsPerRequest:
-                print("----- UNDERFLOW : %s ; %s" %
-                      (r["numPackets"], datetime.now()))
+        self.ip_address = ip_address
+        self.surge_val = 0.0
+        self.sway_val = 0.0
+        self.yaw_val = 0.0
+        self.heavy_val = 0.0
 
-            if r["missed"] != 0:
-                missed += r['missed']
-                print("+++ Missed %s" % r["missed"])
-
-            # Comment out these prints and do something with r
-            #print("Average of %s AIN0, %s AIN1 readings: %s, %s" %
-            #      (len(r["AIN0"]), len(r["AIN1"]), 
-            #       sum(r["AIN0"])/len(r["AIN0"]), 
-            #       sum(r["AIN1"])/len(r["AIN1"])))
-            
-            surge_len = len(r["AIN0"]) 
-            sway_len = len(r["AIN1"])
-            yaw_len = len(r["AIN2"])
-            heavy_len = len(r["AIN3"])
+    def init_lab_jack(self):
+        try:
+            self.lj = ue9.UE9(ethernet=True, ipAddress=self.ip_address)
+            self.lj.getCalibrationData()
+            self.lj.streamConfig(NumChannels=4, 
+                                 ChannelNumbers=[0, 1, 2, 3], 
+                                 ChannelOptions=[8, 8, 8, 8], 
+                                 SettlingTime=0, 
+                                 Resolution=12, 
+                                 ScanFrequency=100)
+            return 1
+        except LabJackPython.LabJackException as e:
+            print('Ошибка инициализации объекта')
+            print(e)
+            return -1
         
-            surge_val = sum(r["AIN0"])/len(r["AIN0"]) 
-            sway_val = sum(r["AIN1"])/len(r["AIN1"])
-            yaw_val = sum(r["AIN2"])/len(r["AIN2"])
-            heavy_val = sum(r["AIN3"])/len(r["AIN3"])
-            
-            surge_valnorm = ((surge_val - SURGE_MIN)/(SURGE_MAX - SURGE_MIN))*400
-            sway_valnorm = ((sway_val - SWAY_MIN)/(SWAY_MAX - SWAY_MIN))*400
-            yaw_valnorm = ((yaw_val - YAW_MIN)/(YAW_MAX - YAW_MIN))*400
-            heavy_valnorm = ((heavy_val - HEAVY_MIN)/(HEAVY_MAX - HEAVY_MIN))*400
-            
-            integer_surge_valnorm = int(surge_valnorm)
-            integer_sway_valnorm = int(sway_valnorm)
-            integer_yaw_valnorm = int(yaw_valnorm)
-            integer_heavy_valnorm = int(heavy_valnorm)
-            #print(f"SURGE:\tAVERAGE: {surge_len}\tREADINGS: {surge_val}")
-            #print(f"SWAY: \tAVERAGE: {sway_len}\tREADINGS: {sway_val}")
-            #print(f"YAW:  \tAVERAGE: {yaw_len}\tREADINGS: {yaw_val}")
+    
+    def run(self):
+        self.get_value()
 
-            print(f"SURGE: {integer_surge_valnorm}\tSWAY: {integer_sway_valnorm}\tYAW: {integer_yaw_valnorm}\tHEAVY: {integer_heavy_valnorm}\n")
+
+    def get_value(self):
+        try:
+            self.lj.streamStart()
+
+            for r in self.lj.streamData():
+                if super().stopped():
+                    print('\nLabJack thread was cancelled')
+                    raise 
+                
+                self.surge_val = sum(r["AIN0"])/len(r["AIN0"]) 
+                self.sway_val = sum(r["AIN1"])/len(r["AIN1"])
+                self.yaw_val = sum(r["AIN2"])/len(r["AIN2"])
+                self.heavy_val = sum(r["AIN3"])/len(r["AIN3"])              
+        
+        except:
+            pass
             
-            dataCount += 1
-            packetCount += r['numPackets']
-        else:
-            # Got no data back from our read.
-            # This only happens if your stream isn't faster than the USB read
-            # timeout, ~1 sec.
-            print("No data ; %s" % datetime.now())
-except:
-    print("".join(i for i in traceback.format_exc()))
-finally:
-    stop = datetime.now()
-    d.streamStop()
-    print("Stream stopped.\n")
-    d.close()
+
+    def reset_values(self):
+        self.surge_val = 0.0
+        self.sway_val = 0.0
+        self.yaw_val = 0.0
+        self.heavy_val = 0.0
+
+    def values(self):
+        return (self.surge_val, self.sway_val, self.yaw_val, self.heavy_val)
+
+
+
+class ModbusServerWritter(StoppableThread):
+    def __init__(self,
+                 ip_address: str = "172.27.12.200",):
+        
+        super().__init__()
+
+        self.ip_address = ip_address
+        self.s = ModbusClient(host=self.ip_address, 
+                              auto_open=False, 
+                              auto_close=False)
+        
+    def run(self):
+        self.write_value()
+
+    def write_value(self):
+        global lab_task
+        self.s.open()
+        try:
+            while True:
+
+                if super().stopped():
+                    print('\nModbus thread was cancelled')
+                    self.s.close()
+                    return -1
+                
+                regs = [int((x+5)*1000) for x in lab_task.values()]
+
+                try:
+                    self.s.write_multiple_registers(regs_addr=0, regs_value=regs)
+                except Exception as e:
+                    print(e)
+                
+        except Exception as e:
+            self.s.close()
+            
+
+if __name__ == "__main__":
+    print('started main')
+
+
+    lab_task = LabJackReaderTask()
+    lab_task.init_lab_jack()
+    lab_task.start()
+
+    modbus_task = ModbusServerWritter()
+    modbus_task.start()
+
+    a = ''
+    while a == '':
+        a = input("any key for stop: ")
+        lab_task.stop()
+        modbus_task.stop()
+
