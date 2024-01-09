@@ -3,3 +3,5 @@
 Активировать venv: `.\venv\Scripts\activate`  
 
 Установить необходимые библиотеки: `pip install -r .\requirements.txt`
+
+Доустановить библиотеку LabJackPython: `python setup.py install`
