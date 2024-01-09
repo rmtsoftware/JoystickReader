@@ -1,2 +1,5 @@
-Чтобы собрать проект, необходимо ввести следующую команду в терминал:
- python setup.py install
+Создать виртуальное окружение: `py -3 -m venv venv`  
+
+Активировать venv: `.\venv\Scripts\activate`  
+
+Установить необходимые библиотеки: `pip install -r .\requirements.txt`
